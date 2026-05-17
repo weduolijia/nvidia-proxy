@@ -1,6 +1,6 @@
-﻿# NVIDIA API Proxy
+﻿# API Proxy
 
-A Cloudflare Workers-based reverse proxy for NVIDIA APIs with automatic multi-key rotation, adaptive rate limiting, real-time rate statistics, and a built-in management dashboard.
+A Cloudflare Workers-based reverse proxy for AI APIs with automatic multi-key rotation, custom provider support, adaptive rate limiting, real-time rate statistics, and a built-in management dashboard.
 
 [中文文档](README_zh.md)
 
@@ -8,33 +8,37 @@ A Cloudflare Workers-based reverse proxy for NVIDIA APIs with automatic multi-ke
 
 ```
 Request → Cloudflare Worker → NV_B (Durable Object)
-                               ├── Per-key token bucket (38 RPM)
-                               ├── Sliding window rate stats
-                               ├── Automatic key failover
-                               ├── Admin dashboard
-                               └── Forward → integrate.api.nvidia.com
+                                ├── Per-key token bucket (configurable RPM)
+                                ├── Sliding window rate stats
+                                ├── Custom provider (switchable via UI)
+                                ├── Automatic key failover
+                                ├── Admin dashboard (4 tabs)
+                                └── Forward → your configured upstream
 ```
 
 ## Features
 
-- **Multi-Key Rotation** — Distribute requests across multiple NVIDIA API keys automatically
+- **Custom Provider** — Switch upstream, model map, and RPM from the admin panel without touching code
+- **Multi-Key Rotation** — Distribute requests across multiple API keys automatically
 - **Adaptive Rate Limiting** — Automatically calculates optimal queue limits based on key count
 - **Real-time Rate Statistics** — 60-second sliding window RPM tracking per key
-- **Admin Dashboard** — Web UI for key management, status monitoring, and utilization alerts
+- **Admin Dashboard** — 4 tabs: Dashboard / API Keys / Provider / Error Logs
+- **AUTH_TOKEN Protection** — Protects both the proxy API and admin panel
 - **Automatic Failover** — Blacklists keys returning 401/403 for 3 minutes
 - **Key Refresh During Queue** — Detects newly added keys while requests are queued
-- **Cold Start Auto-Init** — Automatically initializes limits on first request
+- **Error Logging** — Rate limit, blacklist, and timeout events logged and viewable in panel
+- **Cold Start Auto-Init** — Automatically loads config and initializes limits on first request
 
-## v3 Highlights
+## v6 Highlights
 
 | Feature | Description |
 |---------|-------------|
-| Adaptive limits | Queue limit = `min(max(keyCount × 30, 40), 200)`, recalculated instantly |
-| Rate stats | 60s sliding window, real-time RPM per key |
-| Theoretical rate | `keyCount × 38 RPM` displayed on dashboard |
-| Utilization | `current / theoretical × 100%`, yellow warning at >80% |
-| Cumulative requests | Total request count since DO startup |
-| Per-key RPM | Individual key RPM shown in dashboard |
+| Custom Provider | Configure upstream URL, RPM, model mapping via UI, takes effect immediately |
+| Provider Tab | New admin panel tab for editing provider settings and model mappings |
+| Logs Tab | New admin panel tab for viewing rate limit/blacklist/timeout logs |
+| AUTH_TOKEN on Admin | Admin panel now also requires AUTH_TOKEN (browser prompt) |
+| Universal | Works with any OpenAI-compatible API, not just NVIDIA |
+| Reset to Default | One-click restore to default NVIDIA config |
 
 ## Quick Start
 
@@ -42,7 +46,7 @@ Request → Cloudflare Worker → NV_B (Durable Object)
 
 - Cloudflare account with Workers enabled
 - Node.js >= 18
-- At least one NVIDIA API key
+- At least one API key
 
 ### 1. Install dependencies
 
@@ -73,13 +77,15 @@ AUTH_TOKEN = "your-auth-token"
 ```
 
 - `ADMIN_PATH` — Path for the admin panel. If empty, `/` and `/admin` are accessible.
-- `AUTH_TOKEN` — If set, all proxy requests require `Authorization: Bearer <token>`.
+- `AUTH_TOKEN` — If set, both proxy requests and the admin panel require this token.
 
 ### 4. Deploy
 
 ```bash
 npm run deploy
 ```
+
+Or copy `src/index.js` directly into the Cloudflare Workers editor.
 
 ### 5. Add API Keys
 
@@ -90,16 +96,25 @@ https://your-domain/your-secret-path    # if ADMIN_PATH is set
 https://your-domain/admin               # if ADMIN_PATH is empty
 ```
 
-Paste your NVIDIA API key and click **Add**.
+Paste your API key and click **Add**.
 
-### 6. Verify
+### 6. Configure Provider (optional)
+
+Admin panel → Provider tab, you can modify:
+
+- **Provider Name** — e.g. NVIDIA, OpenAI, Groq
+- **Upstream URL** — API request forwarding target
+- **Per-Key RPM** — Rate limit per key
+- **Model Mapping** — Client model name → upstream model name
+
+### 7. Verify
 
 ```bash
 curl https://your-domain/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-token" \
   -d '{
-    "model": "meta/llama-3.1-8b-instruct",
+    "model": "your-model-name",
     "messages": [{"role": "user", "content": "Hello"}]
   }'
 ```
@@ -110,13 +125,13 @@ Skip `Authorization` header if `AUTH_TOKEN` is not set.
 
 ### Proxy Endpoints
 
-All non-admin paths are forwarded to `integrate.api.nvidia.com`:
+All non-admin paths are forwarded to your configured upstream:
 
 ```bash
 POST /v1/chat/completions
 POST /v1/images/generations
 GET  /v1/models
-# ...and any other NVIDIA API endpoint
+# ...and any OpenAI-compatible API endpoint
 ```
 
 ### Admin Endpoints
@@ -128,10 +143,14 @@ All under your `ADMIN_PATH`:
 | `/{path}` | GET | Admin dashboard |
 | `/{path}/__debug` | GET | Full status dump (limits, rates, utilization) |
 | `/{path}/__ping` | GET | Health check |
-| `/{path}/__addkey?key=xxx` | GET | Add an API key |
-| `/{path}/__delkey?key=xxx` | GET | Remove an API key |
+| `/{path}/__addkey` | POST | Add an API key (JSON `{"key": "xxx"}`) |
+| `/{path}/__delkey` | POST | Remove an API key (JSON `{"key": "xxx"}`) |
 | `/{path}/__listkeys` | GET | List all keys with status |
-| `/{path}/__clearkeys` | GET | Remove all keys |
+| `/{path}/__clearkeys` | POST | Clear all keys |
+| `/{path}/__getconfig` | GET | Get provider configuration |
+| `/{path}/__setconfig` | POST | Update provider configuration |
+| `/{path}/__resetconfig` | POST | Reset to default provider config |
+| `/{path}/__logs` | GET | View error logs |
 
 ### `__debug` Response
 
@@ -147,6 +166,7 @@ All under your `ADMIN_PATH`:
   "currentRPM": 42,
   "utilization": 36.8,
   "totalRequests": 1234,
+  "providerName": "NVIDIA",
   "keys": [
     {
       "key": "nvapi-xxx",
@@ -166,42 +186,34 @@ All under your `ADMIN_PATH`:
 | `queueLimit` | Max queue size (auto-calculated) |
 | `globalTokens` | Sum of all key token buckets |
 | `globalNextMs` | Shortest wait time across all keys (ms) |
-| `perKeyRPM` | Base rate per key (38 RPM) |
-| `theoreticalRPM` | Theoretical max = `keyCount × 38` |
+| `perKeyRPM` | Base rate per key |
+| `theoreticalRPM` | Theoretical max = `keyCount × perKeyRPM` |
 | `currentRPM` | Actual RPM over the last 60s |
 | `utilization` | `currentRPM / theoreticalRPM × 100%` |
 | `totalRequests` | Total requests since DO startup |
+| `providerName` | Current provider name |
 | `keys[].currentRPM` | Per-key RPM over the last 60s |
 
 ## Dashboard Features
 
 | Feature | Description |
 |---------|-------------|
-| API Key count | Total keys loaded |
-| Queue size | Currently queued requests |
-| Theoretical rate | `keyCount × 38 RPM`, auto-updates |
-| Current rate | Actual 60s RPM, yellow at >70% theoretical |
-| Utilization | Current / theoretical %, yellow warning at >80% |
-| Total tokens | Sum of all key buckets |
-| Min wait | Shortest token wait across all keys (ms) |
-| Total requests | Cumulative count, formatted (e.g. 1.2k) |
-| Add key | Paste key, click add or press Enter |
-| Remove key | Red delete button per key |
-| Clear all | One-click remove all |
-| Copy key | Click clipboard icon to copy |
-| Per-key RPM | Real-time RPM display beside each key |
-| Status indicators | 🟢 OK / 🟡 Low balance / 🔴 Blacklisted |
+| Dashboard | Key count, queue, rates, utilization, cumulative requests |
+| API Keys | Add/remove/clear/copy keys, status indicators, per-key RPM |
+| Provider | Edit name, upstream URL, RPM, model mapping table — save to apply |
+| Logs | View recent error events (rate limited, blacklisted, timeout) |
+| AUTH Protection | Admin panel requires token if AUTH_TOKEN is set |
 | Auto-refresh | Status refreshes every 5 seconds |
 
 ## Adaptive Rate Limiting
 
 | Parameter | Formula | Example (3 keys) | Example (6 keys) |
 |-----------|---------|------------------|------------------|
-| Per-key limit | `38 RPM` (fixed) | 38 RPM | 38 RPM |
-| Total rate | `keyCount × 38 RPM` | 114 RPM | 228 RPM |
+| Per-key limit | From provider config (default 38 RPM) | 38 RPM | 38 RPM |
+| Total rate | `keyCount × perKeyRPM` | 114 RPM | 228 RPM |
 | Queue limit | `min(max(keyCount × 30, 40), 200)` | 90 | 180 |
 
-Adding or removing a key recalculates limits instantly. Cold start initializes on first request.
+Adding or removing a key recalculates limits instantly. Switching providers updates RPM automatically.
 
 ### Rate Statistics
 
@@ -224,13 +236,13 @@ Adding or removing a key recalculates limits instantly. Cold start initializes o
 ```
 nvidia-proxy/
 ├── src/
-│   └── worker.js        # Core worker (rate limiting, stats, admin, proxy)
-├── wrangler.toml         # Cloudflare Workers configuration
-├── package.json          # Project metadata & scripts
-├── GUIDE.md              # Deployment guide (English)
-├── GUIDE_zh.md           # Deployment guide (Chinese)
-├── README.md             # This file
-├── README_zh.md          # Chinese README
+│   └── index.js           # Core worker (rate limiting, provider, admin, proxy)
+├── wrangler.toml           # Cloudflare Workers configuration
+├── package.json            # Project metadata & scripts
+├── GUIDE.md                # Deployment guide (English)
+├── GUIDE_zh.md             # Deployment guide (Chinese)
+├── README.md               # This file
+├── README_zh.md            # Chinese README
 └── .gitignore
 ```
 
@@ -260,13 +272,16 @@ Check browser dev tools (F12), verify `ADMIN_PATH` env var, and ensure the lates
 You have `AUTH_TOKEN` set. Add `-H "Authorization: Bearer your-token"` to requests. Or remove `AUTH_TOKEN` from `wrangler.toml` and redeploy.
 
 **Q: Need more throughput?**
-Add more API keys. Each additional key adds 38 RPM to the theoretical maximum.
+Add more API keys. Each additional key adds perKeyRPM to the theoretical maximum.
 
 **Q: Utilization consistently >80%?**
 You're approaching the limit of your current key pool. Add more keys to scale.
 
+**Q: How to switch providers?**
+Admin panel → Provider tab → Edit upstream URL, RPM, and model mapping → Click "Save", takes effect immediately.
+
 **Q: How to update the code?**
-Modify `src/worker.js` then run `npm run deploy`.
+Modify `src/index.js` then run `npm run deploy`. Or paste the code into the Cloudflare Workers editor.
 
 ## License
 
@@ -277,4 +292,3 @@ MIT
 > This project was entirely generated by AI.
 >
 > If you need help with deployment or configuration, share this README with any AI assistant (ChatGPT, Claude, SOLO, etc.) for step-by-step guidance.
-

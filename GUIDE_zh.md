@@ -1,30 +1,29 @@
-﻿# NVIDIA Proxy 完整部署流程
+﻿# API Proxy — 完整部署流程
 
 [English](GUIDE.md)
 
 ## 项目简介
 
-将 NVIDIA API 的请求通过 Cloudflare Workers 反向代理，自动管理多个 API Key 的轮换、自适应限流、速率统计和故障转移。
+将 AI API 的请求通过 Cloudflare Workers 反向代理，支持自定义提供商、多 Key 自动轮换、自适应限流、速率统计和故障转移。
 
 ```
 用户请求 → Cloudflare Worker → NV_B (Durable Object)
-                                ├── 每 Key 限流 (38 RPM) + 速率统计
-                                ├── Key1 令牌桶 + 速率统计
-                                ├── Key2 令牌桶 + 速率统计
-                                ├── Key3 令牌桶 + 速率统计
-                                └── 转发 → integrate.api.nvidia.com
+                                 ├── 每 Key 限流 (可配置 RPM) + 速率统计
+                                 ├── Key1 令牌桶 + 速率统计
+                                 ├── Key2 令牌桶 + 速率统计
+                                 ├── Key3 令牌桶 + 速率统计
+                                 └── 转发 → 你配置的上游地址
 ```
 
-### v3 新特性
+### v6 新特性
 
 | 特性 | 说明 |
 |------|------|
-| **自适应限流** | 根据 Key 数量自动计算队列上限，增删 Key 即刻生效 |
-| **速率统计** | 60 秒滑动窗口实时统计每 Key 的 RPM（请求速率） |
-| **理论速率** | 面板展示 `Key 数 × 38 RPM` 的理论上限，一目了然 |
-| **利用率监控** | 当前速率 / 理论速率 × 100%，>80% 黄色预警 |
-| **累计请求** | 记录自 DO 启动以来的总请求数 |
-| **每 Key RPM** | 管理面板中每个 Key 旁显示其实时 RPM |
+| **自定义提供商** | 管理面板中随时切换上游 URL、RPM、模型映射，无需改代码 |
+| **提供商管理** | 提供商 Tab 支持增删改模型映射，保存即生效 |
+| **错误日志** | 限流/封禁/超时自动记录 KV，面板可查看 |
+| **AUTH_TOKEN 保护面板** | 管理面板也需要 Token 认证（浏览器弹窗输入） |
+| **全兼容** | 不限于 NVIDIA，可代理任何 OpenAI 兼容 API |
 
 ### 用到了 Cloudflare 哪些存储/状态能力？
 
@@ -33,7 +32,7 @@
 | 能力 | 用途 | 说明 |
 |------|------|------|
 | **Durable Objects（DO）** | 限流 + 速率统计 | 全局单例，精确控制每 Key 限流。搭配滑动窗口计数器实现实时 RPM 统计。DO 有状态，不会因 Worker 冷启动丢失数据 |
-| **KV（Key-Value）** | 存储 API Key | 所有 NVIDIA API Key 保存在 KV 里，通过管理面板或 API 增删改查，Worker 重启后 Key 不丢失 |
+| **KV（Key-Value）** | 存储 API Key + 提供商配置 | 所有 API Key 和提供商配置保存在 KV 里，通过管理面板或 API 增删改查，Worker 重启后不丢失 |
 
 **为什么需要 DO？**
 - Worker 本身是**无状态**的，每次请求可能分配到不同的机器
@@ -42,8 +41,8 @@
 - 搭配 Cron 触发器每 5 分钟发一次保活请求，防止 DO 因闲置被回收
 
 **为什么需要 KV？**
-- 存储 API Key 列表，支持动态增删，无需修改代码
-- 相比硬编码在代码里，KV 可以在线管理，部署后也能随时加减 Key
+- 存储 API Key 列表和提供商配置，支持动态修改，无需改代码
+- 相比硬编码在代码里，KV 可以在线管理，部署后也能随时修改
 
 ---
 
@@ -53,15 +52,13 @@
 |------|------|
 | Cloudflare 账号 | 需要开通 Workers 功能 |
 | Node.js >= 18 | 用于 wrangler CLI 部署 |
-| NVIDIA API Key | 至少一个，可从 NVIDIA 开发者平台获取 |
+| API Key | 至少一个，从对应平台获取 |
 
 ---
 
 ## 二、部署步骤
 
 ### 2.1 安装依赖
-
-> 如果你不熟悉命令行操作，下面每一步都有详细说明。
 
 #### ① 打开终端（命令行）
 
@@ -112,7 +109,7 @@ added 1 package in 2s
 ### 2.2 配置 KV 命名空间
 
 > **KV（Key-Value）** 是 Cloudflare 的键值存储服务，用于持久化保存数据。
-> 本项目用它来存储你添加的 API Key，即使 Worker 重启或更新，Key 也不会丢失。
+> 本项目用它来存储你添加的 API Key 和提供商配置，即使 Worker 重启或更新，数据也不会丢失。
 
 在终端中运行以下命令，创建一个 KV 命名空间：
 
@@ -149,8 +146,8 @@ id = "abc123def456..."   # ← 替换为你的 ID
 # 不设则 / 和 /admin 可直接访问管理面板
 ADMIN_PATH = "你的密码"
 
-# API 鉴权 Token（可选）
-# 设置后，所有代理请求必须带 Authorization: Bearer <token>
+# API + 管理面板鉴权 Token（可选）
+# 设置后，所有代理请求和管理面板必须验证此 Token
 # 不设则跳过鉴权，任何人都能调用你的代理
 AUTH_TOKEN = "你的token"
 ```
@@ -165,6 +162,8 @@ npx wrangler deploy
 ```
 ✨  Deployment complete! Take a peek over at https://你的域名.workers.dev
 ```
+
+**或者**：直接将 `src/index.js` 全文复制到 Cloudflare Workers 编辑器中，保存部署。
 
 ---
 
@@ -182,11 +181,24 @@ https://你的域名/你的密码
 https://你的域名/admin
 ```
 
-在输入框中粘贴你的 NVIDIA API Key，点击「添加」。
+如果设置了 `AUTH_TOKEN`，浏览器会弹窗要求输入 Token。
 
-> API Key 格式示例：`nvapi-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+在输入框中粘贴你的 API Key，点击「添加」。
 
-### 3.2 验证代理是否正常
+> API Key 格式示例：`nvapi-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` 或 `sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+
+### 3.2 配置提供商（可选）
+
+管理面板 → 提供商 Tab：
+
+1. **提供商名称** — 给你的提供商起个名字（如 "NVIDIA"、"OpenAI"、"Groq"）
+2. **上游地址** — API 请求转发到的真实地址
+3. **每 Key RPM** — 每个 Key 的速率限制
+4. **模型映射表** — 添加「客户端模型名 → 上游模型名」的映射
+
+修改完成后点击「保存配置」，立即生效，无需重启。
+
+### 3.3 验证代理是否正常
 
 > 如果设置了 `AUTH_TOKEN`，下面请求需要加上 `-H "Authorization: Bearer 你的token"`
 > 没设置则直接请求即可，不需要鉴权。
@@ -196,12 +208,12 @@ curl https://你的域名/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer 你的token" \
   -d '{
-    "model": "meta/llama-3.1-8b-instruct",
+    "model": "你的模型名",
     "messages": [{"role": "user", "content": "你好"}]
   }'
 ```
 
-> 注意：请求中不需要带 NVIDIA API Key，Worker 会自动管理。
+> 注意：请求中不需要带上游的 API Key，Worker 会自动管理。
 > 如果收到 401 错误，说明需要设置 `Authorization` 头或检查 Token 是否正确。
 
 ---
@@ -210,7 +222,7 @@ curl https://你的域名/v1/chat/completions \
 
 ### 4.1 代理转发
 
-所有非管理路径的请求都会被转发到 `integrate.api.nvidia.com`。
+所有非管理路径的请求都会被转发到你配置的上游地址。
 
 ```
 POST https://你的域名/v1/chat/completions
@@ -227,10 +239,14 @@ GET  https://你的域名/v1/models
 | `/{path}` | GET | 管理面板页面 |
 | `/{path}/__debug` | GET | 查看完整状态（限流、速率、利用率） |
 | `/{path}/__ping` | GET | 健康检查 |
-| `/{path}/__addkey?key=xxx` | GET | 添加 API Key |
-| `/{path}/__delkey?key=xxx` | GET | 删除 API Key |
+| `/{path}/__addkey` | POST | 添加 API Key |
+| `/{path}/__delkey` | POST | 删除 API Key |
 | `/{path}/__listkeys` | GET | 列出所有 Key 及状态 |
-| `/{path}/__clearkeys` | GET | 清空所有 Key |
+| `/{path}/__clearkeys` | POST | 清空所有 Key |
+| `/{path}/__getconfig` | GET | 获取提供商配置 |
+| `/{path}/__setconfig` | POST | 更新提供商配置 |
+| `/{path}/__resetconfig` | POST | 恢复默认 NVIDIA 配置 |
+| `/{path}/__logs` | GET | 查看错误日志 |
 
 ### 4.3 `__debug` 返回字段
 
@@ -246,6 +262,7 @@ GET  https://你的域名/v1/models
   "currentRPM": 42,
   "utilization": 36.8,
   "totalRequests": 1234,
+  "providerName": "NVIDIA",
   "keys": [
     {
       "key": "nvapi-xxx",
@@ -265,25 +282,13 @@ GET  https://你的域名/v1/models
 | `queueLimit` | 队列上限（自动计算：Key 数 × 30，最小 40，最大 200） |
 | `globalTokens` | 所有 Key 令牌之和 |
 | `globalNextMs` | 所有 Key 中最短的令牌等待毫秒数 |
-| `perKeyRPM` | 每 Key 基准速率（38 RPM） |
+| `perKeyRPM` | 每 Key 基准速率 |
 | `theoreticalRPM` | 理论最大速率 = `keyCount × perKeyRPM` |
 | `currentRPM` | 过去 60 秒实际请求速率 |
 | `utilization` | 利用率 = `currentRPM / theoreticalRPM × 100%` |
 | `totalRequests` | DO 启动以来的累计请求数 |
+| `providerName` | 当前提供商名称 |
 | `keys[].currentRPM` | 该 Key 过去 60 秒的实际 RPM |
-
-示例：
-
-```bash
-# 添加 Key
-curl "https://你的域名/密码/__addkey?key=nvapi-xxxxxxxxxxxx"
-
-# 查看状态
-curl "https://你的域名/密码/__debug"
-
-# 删除 Key
-curl "https://你的域名/密码/__delkey?key=nvapi-xxxxxxxxxxxx"
-```
 
 ---
 
@@ -291,20 +296,11 @@ curl "https://你的域名/密码/__delkey?key=nvapi-xxxxxxxxxxxx"
 
 | 功能 | 说明 |
 |------|------|
-| API Keys 统计 | Key 总数 |
-| 排队中 | 当前排队请求数 |
-| 理论速率 | `Key 数 × 38 RPM`，自动更新 |
-| 当前速率 | 过去 60 秒实际 RPM，>70% 理论值变黄 |
-| 利用率 | 当前/理论 × 100%，>80% 黄色预警 |
-| 总令牌 | 所有 Key 令牌之和 |
-| 最短等待 | 所有 Key 中最短等待毫秒数 |
-| 累计请求 | 总请求数（过千显示为 1.2k） |
-| 添加 Key | 输入框粘贴 Key，点击添加或按回车 |
-| 删除 Key | 每个 Key 右侧的红色「删除」按钮 |
-| 清空全部 | 右上角一键清空 |
-| 复制 Key | 点击 📋 图标复制到剪贴板 |
-| 每 Key RPM | 每个 Key 旁显示其实时 RPM（如 `15rpm 30t`） |
-| 状态指示 | 🟢 正常 / 🟡 额度不足 / 🔴 已拉黑 |
+| 仪表盘 | Key 总数、排队数、理论/当前速率、利用率、令牌、累计请求 |
+| API Keys | 添加/删除/清空/复制 Key，状态指示（🟢 🟡 🔴），每 Key RPM |
+| 提供商 | 修改名称、上游 URL、RPM、模型映射表，保存即生效 |
+| 日志 | 查看最近错误事件（限流、封禁、超时），一键刷新 |
+| AUTH 保护 | 设置 `AUTH_TOKEN` 后，面板需输入 Token 才能访问 |
 | 自动刷新 | 每 5 秒自动刷新状态 |
 
 ---
@@ -313,15 +309,15 @@ curl "https://你的域名/密码/__delkey?key=nvapi-xxxxxxxxxxxx"
 
 ### 核心机制
 
-系统以 `PER_KEY_RPM = 38` 为基准，根据 Key 数量自动推导所有限制参数：
+系统以你配置的 `perKeyRPM` 为基准，根据 Key 数量自动推导所有限制参数：
 
 | 参数 | 计算公式 | 示例（3 个 Key） | 示例（6 个 Key） |
 |------|----------|------------------|------------------|
-| 每 Key 限流 | `38 RPM`（固定） | 38 RPM | 38 RPM |
-| 总速率上限 | `Key 数 × 38 RPM` | 114 RPM | 228 RPM |
+| 每 Key 限流 | 由提供商配置（默认 38 RPM） | 38 RPM | 38 RPM |
+| 总速率上限 | `Key 数 × perKeyRPM` | 114 RPM | 228 RPM |
 | 队列上限 | `min(max(Key 数 × 30, 40), 200)` | 90 | 180 |
 
-添加或删除 Key 时，系统**即刻重算**队列上限，无需重启或手动修改配置。首次请求时自动从 KV 加载 Key 数量完成初始化。
+添加或删除 Key 时，系统**即刻重算**队列上限，无需重启或手动修改配置。切换提供商后 RPM 自动更新。
 
 ### 排队期间 Key 刷新
 
@@ -368,35 +364,37 @@ npx wrangler deploy --dry-run
 ```
 nvidia-proxy/
 ├── src/
-│   └── worker.js        # Worker 主代码（限流 + 速率统计 + 管理面板 + 代理转发）
-├── wrangler.toml         # Cloudflare Workers 配置（KV + DO + Cron）
-├── package.json          # 项目依赖配置
-├── README.md             # 项目 README（英文）
-├── README_zh.md          # 项目 README（中文）
-├── GUIDE.md              # 部署指南（英文）
-├── GUIDE_zh.md           # 部署指南（中文，本文件）
-└── .gitignore            # Git 忽略规则
+│   └── index.js            # Worker 主代码（限流 + 提供商 + 管理面板 + 代理转发）
+├── wrangler.toml            # Cloudflare Workers 配置（KV + DO + Cron）
+├── package.json             # 项目依赖配置
+├── README.md                # 项目 README（英文）
+├── README_zh.md             # 项目 README（中文）
+├── GUIDE.md                 # 部署指南（英文）
+├── GUIDE_zh.md              # 部署指南（中文，本文件）
+└── .gitignore               # Git 忽略规则
 ```
 
-### worker.js 核心模块
+### index.js 核心模块
 
 | 模块 | 行数 | 职责 |
 |------|------|------|
-| 常量 & 工具函数 | ~30 | `PER_KEY_RPM`、CORS、JSON 响应等 |
-| `serveAdmin()` | ~275 | 管理面板完整 HTML/CSS/JS（暗色 UI） |
-| `TokenBucket` | ~40 | 令牌桶限流算法，支持运行时 `updateLimits()` |
-| `NV_B` (Durable Object) | ~360 | 限流、速率统计、Key 管理、请求转发 |
+| 常量 & 工具函数 | ~30 | `VERSION`、CORS、JSON 响应、HTML 转义 |
+| `TokenBucket` | ~40 | 令牌桶限流算法 |
+| `RpmCounter` | ~40 | 60 秒滑动窗口速率计数器 |
+| `makeTranslators()` | ~120 | 工厂函数：动态读取模型映射，OpenAI/Anthropic 格式互转 |
+| `serveAdmin()` | ~370 | 管理面板完整 HTML/CSS/JS（4 个 Tab、提供商配置、日志） |
+| `NV_B` (Durable Object) | ~450 | 配置加载、Key 管理、限流、转发、日志 |
 | `export default` | ~15 | Worker 入口 + Cron 保活触发器 |
 
 ### wrangler.toml 配置了什么？
 
 | 配置项 | 类型 | 作用 |
 |--------|------|------|
-| `[[kv_namespaces]]` | KV 命名空间 | 持久化存储 API Key，绑定为 `NVIDIA_KV` |
+| `[[kv_namespaces]]` | KV 命名空间 | 持久化存储 API Key + 提供商配置，绑定为 `NVIDIA_KV` |
 | `[[durable_objects.bindings]]` | Durable Objects | 限流 + 速率统计，绑定为 `NV_C`，类名 `NV_B` |
 | `[[migrations]]` | DO 迁移 | 首次部署时创建 `NV_B` 这个 DO 类 |
 | `[triggers]` | Cron 触发器 | 每 5 分钟触发 `scheduled()`，保活 DO 防止被回收 |
-| `[vars]` | 环境变量 | 可配置 `ADMIN_PATH`（管理面板路径）和 `AUTH_TOKEN`（API 鉴权） |
+| `[vars]` | 环境变量 | 可配置 `ADMIN_PATH`（管理面板路径）和 `AUTH_TOKEN`（API + 面板鉴权） |
 
 ---
 
@@ -427,16 +425,20 @@ curl https://你的域名/v1/chat/completions \
 如果不想用鉴权，把 `wrangler.toml` 里的 `AUTH_TOKEN` 删掉重新部署即可。
 
 ### Q: 总速率不够用怎么办？
-**加 Key 就行。** 每加一个 Key，总速率上限自动增加 38 RPM，队列上限也会相应提高。面板上的「理论速率」会实时更新。
+**加 Key 就行。** 每加一个 Key，总速率上限自动增加 perKeyRPM，队列上限也会相应提高。面板上的「理论速率」会实时更新。
 
 ### Q: 利用率很高（>80%）说明什么？
 说明你的请求量接近当前 Key 池的理论上限，建议**添加更多 Key** 来扩容。黄色预警是一个提醒信号。
 
+### Q: 如何更换提供商？
+管理面板 → 提供商 Tab → 修改上游地址、RPM 和模型映射 → 点击「保存配置」，立即生效，无需改代码。
+
 ### Q: 如何更新代码？
 ```bash
-# 修改 src/worker.js 后重新部署
+# 修改 src/index.js 后重新部署
 npm run deploy
 ```
+或者直接将修改后的代码复制到 Cloudflare Workers 编辑器。
 
 ---
 
