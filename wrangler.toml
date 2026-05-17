@@ -1,0 +1,16 @@
+name = "nvidia-proxy"
+main = "src/index.js"
+compatibility_date = "2026-05-16"
+
+[[durable_objects.bindings]]
+name = "NV_C"
+class_name = "NV_B"
+
+[[kv_namespaces]]
+binding = "NVIDIA_KV"
+id = ""
+preview_id = ""
+
+[vars]
+AUTH_TOKEN = ""
+ADMIN_PATH = ""
